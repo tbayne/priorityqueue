@@ -6,21 +6,24 @@ import (
 	"sync"
 )
 
-// An Item is something we manage in a Priority queue.
-type Item struct {
-	ID       int
+// An QItem is something we manage in a Priority queue.
+type QItem struct {
+	ID       string
+	ParentID string
 	Value    interface{} // The value of the item; can hold any type.
 	Priority int         // The Priority of the item in the queue.
+
 	// The index is needed by update and is maintained by the heap.Interface methods.
 	index int // The index of the item in the heap.
 }
 
-// A Items implements heap.Interface and holds Items.
-type Items []*Item
+// A QItems implements heap.Interface and holds QItems.
+type QItems []*QItem
 
 type PriorityQueue struct {
-	m    sync.Mutex
-	data Items
+	m         sync.Mutex
+	available bool
+	data      QItems
 }
 
 func NewPriorityQueue() *PriorityQueue {
@@ -28,9 +31,16 @@ func NewPriorityQueue() *PriorityQueue {
 	var pq PriorityQueue
 
 	// Initialize our heap backing store
-	pq.data = make(Items, 0)
+	pq.data = make(QItems, 0)
+	heap.Init(&pq.data)
 
 	return &pq
+}
+
+// Destroy clears the queue and destroys the underlying storage
+func (pq *PriorityQueue) Destroy() {
+	pq.Clear()
+	pq.data = nil
 }
 
 func (pq *PriorityQueue) Len() int {
@@ -39,193 +49,166 @@ func (pq *PriorityQueue) Len() int {
 	return pq.data.Len()
 }
 
-func (pq *PriorityQueue) Push(i Item) {
+func (pq *PriorityQueue) Push(i QItem) {
 
 	pq.m.Lock()
 	defer pq.m.Unlock()
-	pq.data.Push(i)
+	heap.Push(&pq.data, i)
 
 }
 
-// Todo: Pop() Return nil and an error if there is nothing in the queue
-func (pq *PriorityQueue) Pop() (*Item, error) {
+func (pq *PriorityQueue) Pop() (*QItem, error) {
 	if pq.data.Len() > 0 {
 		pq.m.Lock()
 		defer pq.m.Unlock()
-		r := pq.data.Pop()
-		return r.(*Item), nil
+		r := heap.Pop(&pq.data)
+		return r.(*QItem), nil
 	}
-	return nil, fmt.Errorf("Queue is empty, nothing to Pop")
+	return nil, fmt.Errorf("queue is empty, nothing to Pop")
+}
+
+// UpdatePriorityById() updates the priority of an item in the queue
+func (pq *PriorityQueue) UpdatePriorityByParentId(parentID string, priority int) int {
+	pq.m.Lock()
+	defer pq.m.Unlock()
+	index := -1
+	itemsUpdated := 0
+	// Walk every item in the queue
+	for _, element := range pq.data {
+		if element.ParentID == parentID {
+			index = element.index
+			pq.data.update(pq.data[index], priority)
+			itemsUpdated++
+		}
+	}
+	return itemsUpdated
+}
+
+/* Clear drains all items from the queue */
+func (pq *PriorityQueue) Clear() {
+	pq.m.Lock()
+	defer pq.m.Unlock()
+	for pq.data.Len() > 0 {
+		x := heap.Pop(&pq.data)
+		if x != nil {
+			x = nil
+		}
+	}
+}
+
+func (pq *PriorityQueue) locateItemByID(id string) (int, error) {
+	var index = -1
+	for _, element := range pq.data {
+		if element.ID == id {
+			index = element.index
+			break
+		}
+	}
+	if index == -1 {
+		return -1, fmt.Errorf("ID Not found: [%s]", id)
+	}
+	return index, nil
+}
+
+// DeleteItemById() deletes an item from the queue based on the ID
+
+func (pq *PriorityQueue) DeleteItemById(id string) error {
+	pq.m.Lock()
+	defer pq.m.Unlock()
+	index, err := pq.locateItemByID(id)
+	if err != nil {
+		return err
+	}
+	err = pq.data.delete(index)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeleteItemByParentId() deletes all items with a matching ParentID from the queue based on the Parent ID
+// Note deletes can be expensive
+
+func (pq *PriorityQueue) DeleteItemsByParentId(parentID string) (int, error) {
+	pq.m.Lock()
+	defer pq.m.Unlock()
+
+	itemsDeleted := 0
+
+	// A place to collect the indexes for the items we want to delete
+	var indexesToDelete []int
+
+	for _, element := range pq.data {
+		if element.ParentID == parentID {
+			indexesToDelete = append(indexesToDelete, element.index)
+		}
+	}
+
+	for index := range indexesToDelete {
+
+		err := pq.data.delete(index)
+		if err != nil {
+			return itemsDeleted, err
+		}
+		itemsDeleted++
+	}
+
+	return itemsDeleted, nil
 }
 
 /* Implement the heap interface methods: Len, Less, Swap, Push, and Pop */
 
-func (pq Items) Len() int {
-	return len(pq)
+func (qData QItems) Len() int {
+	return len(qData)
 }
 
-func (pq Items) Less(i, j int) bool {
+func (qData QItems) Less(i, j int) bool {
 	// We want Pop to give us the highest, not lowest, Priority so we use greater than here.
 	//   Priority 10 is greater than Priority 1, the larger the number the higher the Priority
-	return pq[i].Priority > pq[j].Priority
+	return qData[i].Priority > qData[j].Priority
 }
 
-func (pq Items) Swap(i, j int) {
-	pq[i], pq[j] = pq[j], pq[i]
-	pq[i].index = i
-	pq[j].index = j
+func (qData QItems) Swap(i, j int) {
+	qData[i], qData[j] = qData[j], qData[i]
+	qData[i].index = i
+	qData[j].index = j
 }
 
-func (pq *Items) Push(x interface{}) {
-	n := len(*pq)
-	item := x.(Item)
+// Push adds an item to the queue
+// Note do NOT call this directly, this is called by the heap
+// implementation and not your application
+func (qData *QItems) Push(x interface{}) {
+	n := len(*qData)
+	item := x.(QItem)
 	item.index = n
-	*pq = append(*pq, &item)
+	*qData = append(*qData, &item)
 }
 
-func (pq *Items) Pop() interface{} {
-	old := *pq
+// Pop removes an item to the queue
+// Note do NOT call this directly, this is called by the heap
+// implementation and not your application
+func (qData *QItems) Pop() interface{} {
+	old := *qData
 	n := len(old)
 	item := old[n-1]
 	old[n-1] = nil  // avoid memory leak
 	item.index = -1 // for safety
-	*pq = old[0 : n-1]
+	*qData = old[0 : n-1]
 	return item
 }
 
-// update modifies the Priority and value of an Item in the queue.
-func (pq *Items) update(item *Item, value string, priority int) {
-	item.Value = value
+// update modifies the Priority of an QItem in the queue.
+func (qData *QItems) update(item *QItem, priority int) {
+
 	item.Priority = priority
-	heap.Fix(pq, item.index)
+	heap.Fix(qData, item.index)
 }
 
-// This example creates a Items with some items, adds and manipulates an item,
-// and then removes the items in Priority order.
-
-/*
-import (
-	"container/heap"
-	"fmt"
-)
-
-type Item struct {
-	ID       int
-	Value    interface{}
-	Priority int
-	index    int
-}
-
-type Items struct {
-	items    []Item
-	quitchan chan bool
-	// pushchan chan heapPushChanMsg
-	//popchan  chan heapPopChanMsg
-}
-
-
-// heapPopChanMsg - the message structure for a pop chan
-type heapPopChanMsg struct {
-	// h heap.Interface
-	result chan interface{}
-}
-
-// heapPushChanMsg - the message structure for a push chan
-type heapPushChanMsg struct {
-	// h heap.Interface
-	x interface{}
-}
-
-func NewPriorityQueue(len int) Items {
-
-	var pq Items
-	items := make([]Item, len)
-	pq.items = items
-	// Create our syncronizing channels:
-	//pq.pushchan = make(chan heapPushChanMsg, 10)
-	//pq.popchan = make(chan heapPopChanMsg, 10)
-	heap.Init(pq)
-
-	// Start the watcher
-	//pq.quitchan = pq.watchHeapOps()
-
-	// How many items do we actually contain
-
-	return pq
-
-}
-
-func (pq *Items) Close() {
-	// Drain queue
-	// Stop the watcher
-	//pq.quitchan <- true
-	//close(pq.quitchan)
-	//close(pq.popchan)
-	//close(pq.pushchan)
-	// Destroy queue
-	pq.items = nil
-}
-
-
-
-// Len - get the length of the queue
-func (pq Items) Len() int {
-	return len(pq.items)
-}
-
-// Less - determine which is a greater Priority
-func (pq Items) Less(i, j int) bool {
-	return pq.items[i].Priority < pq.items[j].Priority
-}
-
-// Swap - implementation of swap for the heap interface
-func (pq Items) Swap(i, j int) {
-	pq.items[i], pq.items[j] = pq.items[j], pq.items[i]
-	pq.items[i].index = i
-	pq.items[j].index = j
-}
-
-// HeapPush - safely push item to a heap interface
-func (pq Items) Push(x interface{}) {
-
-	i := x.(Item)
-	pq.items = append(pq.items, i)
-	pq.pushchan <- heapPushChanMsg{x: x}
-
-}
-
-// HeapPop - safely pop item from a heap interface
-func (pq Items) Pop() interface{} {
-	var result = make(chan interface{})
-	pq.popchan <- heapPopChanMsg{
-		result: result,
+func (qData *QItems) delete(index int) error {
+	if index < qData.Len() {
+		// Remove the element at index i from a.
+		heap.Remove(qData, index)
+		return nil
 	}
-	pq.count = pq.count - 1
-	return <-result
+	return fmt.Errorf("Index out of range")
 }
-
-// watchHeapOps - watch for push/pops to our heap, and serializing the operations
-// with channels
-func (pq *Items) watchHeapOps() chan bool {
-	var quit = make(chan bool)
-	go func() {
-		for {
-			select {
-			case <-quit:
-				// TODO: update to quit gracefully
-				// TODO: maybe need to dump state somewhere?
-				return
-
-			case popMsg := <-pq.popchan:
-				popMsg.result <- heap.Pop(pq)
-				fmt.Println("Items: Popped item from the Items")
-
-			case pushMsg := <-pq.pushchan:
-				heap.Push(pq, pushMsg.x)
-				fmt.Println("Items: Pushed item to the Items")
-			}
-		}
-	}()
-	return quit
-}
-*/
